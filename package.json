@@ -1,6 +1,12 @@
 {
   "name": "yoman-ai",
   "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vinxi dev",
+    "build": "vinxi build",
+    "start": "vinxi start"
+  },
   "dependencies": {
     "@tanstack/react-start": "latest",
     "zod": "latest"
