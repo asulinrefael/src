@@ -15,9 +15,13 @@ const ParsedEventSchema = z.object({
   reminderMinutes: z.number().int().min(0).max(10080).nullable().optional(),
   assumptions: z.array(z.string().max(500)).max(10).optional(),
   warnings: z.array(z.string().max(500)).max(10).optional(),
+  alternativeSlots: z.array(z.object({
+    startTime: z.string().regex(/^\d{2}:\d{2}$/),
+    endTime: z.string().regex(/^\d{2}:\d{2}$/),
+  })).max(3).optional(),
   followUpQuestion: z.string().max(1000).nullable().optional(),
 }).refine(
-  (data) => {
+  (data: any) => {
     if (data.allDay) return true; // no time validation for all-day events
     const [startH, startM] = data.startTime.split(":").map(Number);
     const [endH, endM] = data.endTime.split(":").map(Number);
@@ -150,7 +154,7 @@ export const parseEventFromText = createServerFn({ method: "POST" })
       });
     return schema.parse(input);
   })
-  .handler(async ({ data }) => {
+  .handler(async ({ data }: { data: { text: string; nowIso: string; tz: string; profile?: string } }) => {
     const LOVABLE_API_KEY = process.env.LOVABLE_API_KEY?.trim();
     const GOOGLE_CALENDAR_API_KEY = process.env.GOOGLE_CALENDAR_API_KEY?.trim();
 
@@ -169,7 +173,7 @@ export const parseEventFromText = createServerFn({ method: "POST" })
 
     const agenda = await agendaPromise;
     const agendaBlock = agenda.length
-      ? `\n\nהאירועים ביומן לשבוע הקרוב:\n${agenda.map((a) => `- ${a.start}${a.end ? ` עד ${a.end}` : ""}: ${a.summary}`).join("\n")}\n* בדוק תמיד אם התאריך/שעה שהמשתמש ביקש מתנגשים עם אחד מהאירועים ברשימה זו. אם כן, הוסף אזהרה (warning) מפורטת.`
+      ? `\n\nהאירועים ביומן לשבוע הקרוב:\n${agenda.map((a) => `- ${a.start}${a.end ? ` עד ${a.end}` : ""}: ${a.summary}`).join("\n")}\n* בדוק תמיד אם התאריך/שעה שהמשתמש ביקש מתנגשים עם אחד מהאירועים ברשימה זו. אם כן, הוסף אזהרה (warning) מפורטת והצע זמנים חלופיים (alternativeSlots).`
       : "";
 
     const systemPrompt = `אתה Chief of Staff אישי חכם בעברית. אתה לא רק מחלץ פרטים — אתה חושב לעומק על האירוע ועוזר למשתמש להחליט נכון.
@@ -183,8 +187,9 @@ export const parseEventFromText = createServerFn({ method: "POST" })
 4. הסק תזכורת חכמה (reminderMinutes): פגישה רגילה=30, נסיעה רחוקה=60, אירוע משפחתי=120, פגישה רפואית=180. אם המשתמש ציין במפורש — כבד אותו.
 5. assumptions: רשימת הנחות שעשית שלא היו במפורש בטקסט (למשל "הנחתי שמשך המשמרת 8 שעות לפי הפרופיל"). תהיה שקוף.
 6. warnings: אזהרות מעשיות — חפיפה עם אירוע קיים, סוף שבוע, שעה מאוד מאוחרת/מוקדמת, אילוץ שמופיע בפרופיל ("המשתמש ציין שלא לקבוע בשישי אחה״צ").
-7. followUpQuestion: רק אם משהו ממש לא ברור ודרוש להבהיר — אחרת null.
-8. תאריך בפורמט YYYY-MM-DD, שעות HH:mm (24).${profileBlock}${agendaBlock}`;
+7. alternativeSlots: אם יש חפיפה או התנגשות עם אילוצי המשתמש, הצע עד 3 חלונות זמן פנויים באותו יום או יום אחרי.
+8. followUpQuestion: רק אם משהו ממש לא ברור ודרוש להבהיר — אחרת null.
+9. תאריך בפורמט YYYY-MM-DD, שעות HH:mm (24).${profileBlock}${agendaBlock}`;
 
     const res = await fetch(GATEWAY_AI_URL, {
       method: "POST",
@@ -193,7 +198,7 @@ export const parseEventFromText = createServerFn({ method: "POST" })
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-pro",
+        model: "anthropic/claude-3-5-sonnet",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: data.text },
@@ -227,6 +232,18 @@ export const parseEventFromText = createServerFn({ method: "POST" })
                     type: "array",
                     items: { type: "string" },
                     description: "אזהרות מעשיות למשתמש (חפיפה, אילוץ מהפרופיל וכו')",
+                  },
+                  alternativeSlots: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: {
+                        startTime: { type: "string", description: "HH:mm" },
+                        endTime: { type: "string", description: "HH:mm" },
+                      },
+                      required: ["startTime", "endTime"],
+                    },
+                    description: "הצעות לזמנים חלופיים במקרה של התנגשות",
                   },
                   followUpQuestion: {
                     type: "string",
@@ -305,7 +322,7 @@ export const insertCalendarEvent = createServerFn({ method: "POST" })
       })
       .parse(input);
   })
-  .handler(async ({ data }) => {
+  .handler(async ({ data }: { data: { event: ParsedEvent; tz: string } }) => {
     const LOVABLE_API_KEY = process.env.LOVABLE_API_KEY?.trim();
     const GOOGLE_CALENDAR_API_KEY = process.env.GOOGLE_CALENDAR_API_KEY?.trim();
 
@@ -393,4 +410,159 @@ export const insertCalendarEvent = createServerFn({ method: "POST" })
       eventId: id,
       htmlLink: link,
     };
+  });
+
+export const updateCalendarEvent = createServerFn({ method: "POST" })
+  .inputValidator((input: { eventId: string; event: ParsedEvent; tz: string }) => {
+    return z
+      .object({
+        eventId: z.string().min(1),
+        event: ParsedEventSchema,
+        tz: z.string().min(1).max(64),
+      })
+      .parse(input);
+  })
+  .handler(async ({ data }: { data: { eventId: string; event: ParsedEvent; tz: string } }) => {
+    const LOVABLE_API_KEY = process.env.LOVABLE_API_KEY?.trim();
+    const GOOGLE_CALENDAR_API_KEY = process.env.GOOGLE_CALENDAR_API_KEY?.trim();
+
+    if (!LOVABLE_API_KEY || !GOOGLE_CALENDAR_API_KEY) {
+      return { ok: false as const, error: "חסר מפתח API או חיבור ליומן" };
+    }
+
+    const { eventId, event, tz } = data;
+    const allDayEndDate = event.allDay ? addDaysToDateString(event.date, 1) : event.date;
+
+    const body = event.allDay
+      ? {
+          summary: event.title,
+          location: event.location ?? undefined,
+          description: event.description ?? undefined,
+          start: { date: event.date },
+          end: { date: allDayEndDate },
+        }
+      : {
+          summary: event.title,
+          location: event.location ?? undefined,
+          description: event.description ?? undefined,
+          start: { dateTime: `${event.date}T${event.startTime}:00`, timeZone: tz },
+          end: { dateTime: `${event.date}T${event.endTime}:00`, timeZone: tz },
+        };
+
+    const res = await fetch(`${GATEWAY_CAL_URL}/calendars/primary/events/${eventId}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "X-Connection-Api-Key": GOOGLE_CALENDAR_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      return { ok: false as const, error: `שגיאת עדכון יומן (${res.status})` };
+    }
+
+    return { ok: true as const };
+  });
+
+export const deleteCalendarEvent = createServerFn({ method: "POST" })
+  .inputValidator((input: { eventId: string }) => {
+    return z.object({ eventId: z.string().min(1) }).parse(input);
+  })
+  .handler(async ({ data }: { data: { eventId: string } }) => {
+    const LOVABLE_API_KEY = process.env.LOVABLE_API_KEY?.trim();
+    const GOOGLE_CALENDAR_API_KEY = process.env.GOOGLE_CALENDAR_API_KEY?.trim();
+
+    if (!LOVABLE_API_KEY || !GOOGLE_CALENDAR_API_KEY) {
+      return { ok: false as const, error: "חסר מפתח API או חיבור ליומן" };
+    }
+
+    const res = await fetch(`${GATEWAY_CAL_URL}/calendars/primary/events/${data.eventId}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "X-Connection-Api-Key": GOOGLE_CALENDAR_API_KEY,
+      },
+    });
+
+    if (!res.ok && res.status !== 204) {
+      return { ok: false as const, error: `שגיאת מחיקת יומן (${res.status})` };
+    }
+
+    return { ok: true as const };
+  });
+
+export const listCalendarEvents = createServerFn({ method: "GET" })
+  .inputValidator((input: { timeMin: string; timeMax: string; tz: string }) => {
+    return z.object({
+      timeMin: z.string(),
+      timeMax: z.string(),
+      tz: z.string(),
+    }).parse(input);
+  })
+  .handler(async ({ data }: { data: { timeMin: string; timeMax: string; tz: string } }) => {
+    const LOVABLE_API_KEY = process.env.LOVABLE_API_KEY?.trim();
+    const GOOGLE_CALENDAR_API_KEY = process.env.GOOGLE_CALENDAR_API_KEY?.trim();
+
+    if (!LOVABLE_API_KEY || !GOOGLE_CALENDAR_API_KEY) {
+      return { ok: false as const, error: "חסר מפתח API או חיבור ליומן" };
+    }
+
+    const url = `${GATEWAY_CAL_URL}/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(data.timeMin)}&timeMax=${encodeURIComponent(data.timeMax)}&timeZone=${encodeURIComponent(data.tz)}`;
+
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "X-Connection-Api-Key": GOOGLE_CALENDAR_API_KEY,
+      },
+    });
+
+    if (!res.ok) {
+      return { ok: false as const, error: `שגיאת משיכת יומן (${res.status})` };
+    }
+
+    const json = await res.json() as { items?: any[] };
+    return { ok: true as const, events: json.items ?? [] };
+  });
+
+export const saveOnboardingProfile = createServerFn({ method: "POST" })
+  .inputValidator((input: {
+    workHours: string;
+    preferredMeetingTimes: string;
+    deepWorkTimes: string;
+    workoutTimes: string;
+    otherPreferences: string;
+  }) => {
+    return z.object({
+      workHours: z.string().max(500),
+      preferredMeetingTimes: z.string().max(500),
+      deepWorkTimes: z.string().max(500),
+      workoutTimes: z.string().max(500),
+      otherPreferences: z.string().max(1000),
+    }).parse(input);
+  })
+  .handler(async ({ data }: { data: {
+    workHours: string;
+    preferredMeetingTimes: string;
+    deepWorkTimes: string;
+    workoutTimes: string;
+    otherPreferences: string;
+  } }) => {
+    const LOVABLE_API_KEY = process.env.LOVABLE_API_KEY?.trim();
+    if (!LOVABLE_API_KEY) {
+      return { ok: false as const, error: "LOVABLE_API_KEY חסר" };
+    }
+
+    // כאן בדרך כלל תהיה קריאה ל-Supabase/DB לשמירת הפרופיל
+    // כרגע נחזיר את הפרופיל המעובד כטקסט שה-AI יוכל להשתמש בו כקונטקסט
+    const profileText = `
+שעות עבודה: ${data.workHours}
+זמני פגישות מועדפים: ${data.preferredMeetingTimes}
+זמני עבודה עמוקה: ${data.deepWorkTimes}
+זמני אימון: ${data.workoutTimes}
+העדפות נוספות: ${data.otherPreferences}
+    `.trim();
+
+    return { ok: true as const, profileText };
   });

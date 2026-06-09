@@ -1,0 +1,12 @@
+{
+  "name": "yoman-ai",
+  "version": "1.0.0",
+  "dependencies": {
+    "@tanstack/react-start": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  }
+}
